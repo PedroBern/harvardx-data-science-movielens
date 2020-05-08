@@ -1,0 +1,544 @@
+---
+title: "MovieLens Recommender System Capstone Project - Report"
+author: "Pedro Bernardino Alves Moreira"
+date: "28 Feb, 2020"
+output:
+  pdf_document:
+    highlight: pygments
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    keep_tex: true
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{supertabular}
+  - \usepackage{array}
+  - \usepackage{multirow}
+  - \usepackage{wrapfig}
+  - \usepackage{float}
+  - \usepackage{colortbl}
+  - \usepackage{pdflscape}
+  - \usepackage{tabu}
+  - \usepackage{threeparttable}
+  - \usepackage[normalem]{ulem}
+  - \usepackage{caption}
+  - \usepackage{float}
+---
+
+\captionsetup[table]{skip=5pt}
+
+\onecolumn
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', cache=TRUE)
+```
+
+```{r install_and_load, include=FALSE, echo=FALSE}
+# Install libraries, if not already installed
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(ggplot2)) install.packages("ggplot2")
+if(!require(caret)) install.packages("caret")
+if(!require(knitr)) install.packages("knitr")
+if(!require(knitr)) install.packages("kableExtra")
+
+# Load libraries
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+
+# Set global options
+options(pillar.sigfig = 5)
+```
+
+```{r edx_start_code, include=FALSE, echo=FALSE}
+################################
+# Create edx set, validation set
+################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+\newpage
+
+\twocolumn
+
+# Introduction
+
+This project aims to create a recommender system using the MovieLens dataset as part of the final grade for the **HarvardX PH125.9x Data Science Capstone** on edx.
+
+It uses only a subset of the movielens, containing approximately 10 millions movies ratings, being 90% used for training and 10% for validation. The project gradually evolves an algorithm for recommendation, starting with the simplest possible model then adding more features and comparing to the previous models. Are made a total of 6 models, from just the average to a regularized movie and user effect.
+
+The recommender system works by trying to predict what rating a user would give for a random movie, these movie rating predictions will be compared to the true ratings in the validation set using the root mean squared error (RMSE), with the following formula:
+
+$$\mbox{RMSE} = \sqrt{\frac{1}{n}\sum_{t=1}^{n}e_t^2}$$
+
+```{r utility_functions, include=FALSE, echo=FALSE}
+# RMSE function from the material course book
+# reference: section 33.7.3 Loss function, page 641
+RMSE <- function(true_ratings, predicted_ratings) {
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+# Utility function to get RMSE grade
+rmse_grade <- function(rmse = NULL){
+  grade <- 5
+  if (rmse >= 0.9) {
+    grade <- 5
+  } else if (0.86550 <= rmse & rmse <= 0.89999) {
+    grade <- 10
+  } else if (0.86500 <= rmse & rmse <= 0.86549) {
+    grade <- 15
+  } else if (0.86490 <= rmse & rmse <= 0.86499) {
+    grade <- 20
+  } else if (rmse < 0.86490) {
+    grade <- 25
+  }
+  grade
+}
+
+# Utility to make a results table
+results_table <- function(rmse_results, caption){
+  kable(
+    rmse_results,
+    col.names=c("", "RMSE", "Grade"),
+    booktabs = T,
+    caption = caption,
+    linesep = "\\addlinespace"
+    ) %>%
+    kable_styling(latex_options = "HOLD_position", full_width = T)
+}
+```   
+
+The final model **Regularized movie and user effect with indenpendent tuning parameter** obtains a result of 0.8566827	 RMSE.
+
+# Methods
+
+## Naive Model - Just the average
+
+The naive model is a separator line between the guessing and the real analysis. This means that it is the simplest model someone can build, any guessing rating should have a worst RMSE just as any other serious model should have a better RMSE.
+
+```{r mu, echo=FALSE, include=TRUE}
+# The simplest model
+# reference: 33.7.4 A first model, page 641
+
+# The simplest model is the mean of the training set
+mu <- mean(edx$rating) # 3.512465
+```
+
+In this case, the simplest model is the mean for all ratings, so we are predicting that all ratings a user probably will give, are somehow towards the mean of all ratings, that is **`r mu`**. The formula used is:
+
+$$Y_{u,i} = \hat{\mu} + \varepsilon_{u,i}$$
+
+The $\hat{\mu}$ is the mean from all ratings in the training set, the "true" rating. And the $\varepsilon_{i,u}$ is the independent errors sampled from the same distribution centered at 0.
+
+```{r results_naive_model, echo=FALSE, include=TRUE}
+naive_rmse <- RMSE(validation$rating, mu) # 1.061202
+
+rmse_results <- tibble(
+  method = "Just the average",
+  RMSE = naive_rmse,
+  grade = rmse_grade(naive_rmse))
+
+results_table(rmse_results, "Naive model results")
+
+# 1 Just the average                  1.0612      5
+```
+
+If we run the same model with any value different from the mean, the RMSE is worst, as we can see in table 2.
+
+```{r results_random_models, echo=FALSE, include=TRUE}
+
+# Any value different from the simplest model
+# should return a worse RMSE:
+# Values lesser than mu
+rmse_lesser_value <- RMSE(validation$rating, runif(1, 0.0, mu - 0.1))
+# Values greater then mu
+rmse_greater_value <- RMSE(validation$rating, runif(1, mu + 0.1, 5.0))
+
+rmse_results_2 <- tibble(
+  method = c("Random value lesser than the average", "Random value greater than the average"),
+  RMSE = c(rmse_lesser_value, rmse_greater_value),
+  grade = c(5, 5))
+
+results_table(rmse_results_2, "Random values naive model")
+```
+
+
+## Movie effect model
+
+The naive model can be improved to get a better RMSE. The first approach is to add the movie effect. Some movies are generally ranked higher than others, probably because they are better movies.
+
+We can see it if plot the density for the distance between each movie rating mean and the all movies rating mean:
+
+```{r plot_movie_effect, echo=FALSE, include=TRUE}
+# Adding the movie effect to the model
+# reference: 33.7.5 Modeling movie effects, page 642
+
+# Some movies are generally rated higher than others
+# We can see this by computing the difference from
+# the average for each movie rating and the average for
+# all movies ratings
+movie_avgs <- edx %>%
+  group_by(movieId) %>%
+  summarize(b_i = mean(rating - mu))
+
+# plot the movie effect
+qplot(b_i, data = movie_avgs, bins = 100, color = I("black"), xlab = "Movie effect", ylab = "Count", main = "Movie effect")
+```
+
+The movie effect model can be defined as:
+
+$$Y_{u,i} = \hat{\mu} + b_i + \epsilon_{u,i}$$
+
+It is the previous model with the new movie effect parameter. The $b_i$ measures the popularity for each movie $i$. Where $b_i$ is the difference from each movie rating mean to all movie rating mean:
+
+$$b_i = |\hat{\mu}_i - \hat{\mu}|$$
+
+```{r results_movie_effect, echo=FALSE, include=TRUE}
+
+# Compute the new prediction rate, adding the movie effect
+predicted_ratings <- mu +
+  validation %>%
+  left_join(movie_avgs, by='movieId') %>%
+  pull(b_i)
+
+movie_effect_rmse <- RMSE(validation$rating, predicted_ratings) # 0.9439087
+
+rmse_results <- add_row(
+  rmse_results,
+  method = "Movie effect",
+  RMSE = movie_effect_rmse,
+  grade = rmse_grade(movie_effect_rmse))
+
+results_table(rmse_results[2,], "Movie effect results")
+# 2 Movie effect                      0.94391     5
+```
+
+## Movie and user effect model
+
+Then, we also add the user effect. Some users tend to give higher rating than others. We can see this by plotting the average ratings by users who have rated more than 100 movies:
+
+```{r plot_user_effect, echo=FALSE, include=TRUE}
+# Adding the user effect to the model
+# reference: 33.7.6 User effects, page 643
+
+# Similar to the movie effect, there are users that
+# rate always higher or always lower than the average
+# We can see this by ploting the average ratings by users
+# who have rated more than 100 movies
+edx %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating)) %>%
+  filter(n()>=100) %>%
+  ggplot(aes(b_u)) +
+  xlab("User rating mean") +
+  ggtitle("User effect") +
+  geom_histogram(bins = 30, color = "black")
+```
+
+Now the model is defined as:
+
+$$Y_{u,i} = \hat{\mu} + b_i + b_u + \epsilon_{u,i}$$
+
+And the new parameter $b_u$ is the difference from the user rating to the all movie rating mean with the movie effect:
+
+$$b_u = |\hat{\mu}_u - \hat{\mu} - \hat{b}_i|$$
+
+```{r results_user_and_movie_effect, echo=FALSE, include=TRUE}
+# The user effect is the difference from the
+# user rating, the average rating and the movie effect
+user_avgs <- edx %>%
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings <- validation %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+
+user_and_movie_effect_rmse <- RMSE(predicted_ratings, validation$rating) # 0.86535
+
+rmse_results <- add_row(
+  rmse_results,
+  method = "User and movie effect",
+  RMSE = user_and_movie_effect_rmse,
+  grade = rmse_grade(user_and_movie_effect_rmse))
+
+results_table(rmse_results[3,], "User and movie effect results")
+# 3 User and movie effect             0.86535    15
+```
+
+
+## Regularized movie effect model
+
+There are movies rated many times just as there are movies rated only few times, sometimes only once. Since the movie effect relies on the quantity of times a movie has been rated, the more rates the movie get, the more precise the movie effect is. So we need to regularize this by putting more weight when a movie is rated many times, and shrinking the movie effect when a movie haven't many reviews.
+
+We can see this ploting how many times each movie was rated and the movie effect for that movie, the red line separate between movies with more or less than 10 reviews:
+
+```{r plot_movie_effect_exploration, echo=FALSE, include=TRUE}
+edx %>%
+   group_by(movieId) %>%
+   summarise(cnt = n()) %>%
+   as.data.frame() %>%
+   left_join(movie_avgs, by='movieId') %>%
+   ggplot(aes(b_i, cnt)) +
+   xlab("Movie effect") +
+   ylab("Count - log scale") +
+   ggtitle("Number of ratings for each movie") +
+   scale_y_log10() +
+   geom_point() +
+   geom_hline(yintercept=10, linetype="dashed", color = "red")
+```
+
+To regularize the movie effect we will use the following equation:
+
+$$\hat{b_{i}} (\lambda) = \frac{1}{\lambda + n_{i}} \sum_{u=1}^{n_{i}} (Y_{u,i} - \hat{\mu}) $$
+
+Where $\lambda$ is the tuning parameter that will optimize the formula, $n_{i}$ is the number of rating made for movie $i$. The larger the tuning parameter $\lambda$ is, more we shrink when the number of ratings is small.
+
+Here is a cross-validation to find the best value for $\lambda$ that minimizes the RMSE:
+
+```{r tuning_param_movie_effect_reg, echo=FALSE, include=TRUE}
+# tuning parameter
+lambdas <- seq(0, 10, 0.25)
+
+# Summarize the sum of the deviation from the mean,
+# and the numbers of appearence for each movie,
+# to make the further movie effect calculation with the
+# tuning parameter
+just_the_sum <- edx %>%
+  group_by(movieId) %>%
+  summarize(s = sum(rating - mu), n_i = n())
+
+# Calculate the rmse for each tuning parameter
+rmses <- sapply(lambdas, function(l){
+  predicted_ratings <- validation %>%
+    left_join(just_the_sum, by='movieId') %>%
+    mutate(b_i = s/(n_i+l)) %>% # regularized movie effect
+    mutate(pred = mu + b_i) %>%
+    pull(pred)
+  return(RMSE(predicted_ratings, validation$rating))
+})
+
+# Plot the tuning parameter and the rmse
+qplot(lambdas, rmses, main="Tuning parameter vs RMSE")
+
+# Get the best tuning parameter
+best_lambda <- lambdas[which.min(rmses)] # 2.5
+```
+
+Then, with the best tuning parameter we can see how the not regularized and the regularized movie effect are differents:
+
+```{r movie_effect_reg_comparison, echo=FALSE, include=TRUE}
+
+movie_reg_avgs <- edx %>%
+   group_by(movieId) %>%
+   summarize(b_i = sum(rating - mu)/(n() + best_lambda), n_i = n())
+
+tibble(original = movie_avgs$b_i, regularlized = movie_reg_avgs$b_i, n = movie_reg_avgs$n_i) %>%
+   ggplot(aes(original, regularlized, size=sqrt(n))) +
+   geom_point(shape=1, alpha=0.5) +
+   ggtitle("Difference between original and regularized effect")
+```
+
+The regularized movie effect has a worst RMSE than the combined not regularized movie and user effect. However we see a very small improvement from the not regularized movie effect.
+
+```{r results_regularized_movie_effect, echo=FALSE, include=TRUE}
+regularized_movie_effect_rmse <- rmses[match(best_lambda, lambdas)] # 0.9438521
+
+rmse_results <- add_row(
+  rmse_results,
+  method = "Regularized movie effect",
+  RMSE = regularized_movie_effect_rmse,
+  grade = rmse_grade(regularized_movie_effect_rmse))
+
+results_table(rmse_results[4,], "Regularized movie effect results")
+# 4 Regularized movie effect          0.94385     5
+```
+
+
+## Regularized movie and user effect - same tuning parameter
+
+Just as the regularization was applied to the movie effect, this model has the regularization applied to both movie and user effect. Similar to the previous, the penalty equation is the following:
+
+$$\hat{b_{u}} (\lambda) = \frac{1}{\lambda + n_{i}} \sum_{u=1}^{n_{i}} (Y_{u,i} - \hat{\mu} - \hat{b_{i}}) $$
+
+Here is the plot to find the best tuning parameter for both user and movie effect:
+
+```{r tuning_param_movie_user_effect_reg, echo=FALSE, include=TRUE}
+lambdas <- seq(0, 1, 0.25)
+
+rmses <- sapply(lambdas, function(l){
+  
+  b_i <- edx %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- edx %>%
+    left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  predicted_ratings <- edx %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+  return(RMSE(predicted_ratings, edx$rating))
+})
+
+# Plot the tuning parameter and the rmse
+qplot(lambdas, rmses, main="Tuning parameter vs RMSE")
+
+# Get the best tuning parameter
+best_lambda <- lambdas[which.min(rmses)] # 0.0
+```
+
+The regularized movie and user effect has a better RMSE:
+
+```{r results_movie_user_effect_same_lambda, echo=FALSE, include=TRUE}
+regularized_movie_and_user_effect_same_lambda_rmse <- rmses[match(best_lambda, lambdas)]
+
+rmse_results <- add_row(
+  rmse_results,
+  method = "Regularized movie and user effect same tuning parameter",
+  RMSE = regularized_movie_and_user_effect_same_lambda_rmse,
+  grade = rmse_grade(regularized_movie_and_user_effect_same_lambda_rmse))
+
+results_table(rmse_results[5,], "Regularized movie and user effect with same tuning parameter results")
+# 5 Regularized movie and user effect same tuning parameter 0.85670    25
+```
+
+
+## Regularized movie and user effect - independent tuning parameter
+
+Instead of using the same tuning parameter for both user and movie effect, we can use the best for each.
+
+Here is the plot to find the best tuning parameter just for the user effect:
+
+```{r tuning_param_user_effect_reg, echo=FALSE, include=TRUE}
+lambdas <- seq(0, 10, 2)
+
+rmses <- sapply(lambdas, function(l){
+
+  b_u <- edx %>%
+    left_join(movie_reg_avgs, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  predicted_ratings <- edx %>%
+    left_join(movie_reg_avgs, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+  return(RMSE(predicted_ratings, edx$rating))
+})
+
+# Plot the tuning parameter and the rmse
+qplot(lambdas, rmses, main="Tuning parameter vs RMSE")
+
+# Get the best tuning parameter
+best_lambda <- lambdas[which.min(rmses)] # 0.0
+```
+
+With the best tuning parameter we can see how the not regularized and the regularized user effect are differents, and we actually see there were little difference:
+
+```{r plot_user_effect_reg_diff_to_original, echo=FALSE, include=TRUE}
+user_reg_avgs <- edx %>%
+   left_join(movie_reg_avgs, by = "movieId") %>%
+   group_by(userId) %>%
+   summarize(b_u = sum(rating - b_i - mu)/(n() + best_lambda), n_i = n())
+
+tibble(original = user_avgs$b_u, regularlized = user_reg_avgs$b_u, n = user_reg_avgs$n_i) %>%
+   ggplot(aes(original, regularlized, size=sqrt(n))) +
+   geom_point(shape=1, alpha=0.5) +
+   ggtitle("Difference between original and regularized effect")
+```
+
+The regularized movie and user effect with independent tuning parameter has best RMSE:
+
+```{r resultas_movie_user_effect_different_lambda, echo=FALSE, include=TRUE}
+regularized_movie_and_user_effect_rmse <- rmses[match(best_lambda, lambdas)]
+
+rmse_results <- add_row(
+  rmse_results,
+  method = "Regularized movie and user effect",
+  RMSE = regularized_movie_and_user_effect_rmse,
+  grade = rmse_grade(regularized_movie_and_user_effect_rmse))
+
+results_table(rmse_results[6,], "Regularized movie and user effect with independent tuning parameter results")
+# 6 Regularized movie and user effect                              0.85668    25
+```
+
+# Results
+
+After gradually evolving the algorithm to reduce the RMSE, it's clear that both user and movie effects have a high influence on the rating. The best model "Regularized movie and user effect independent tuning parameter" has a RMSE of 0.85668.
+
+Here is the final table with all results:
+
+```{r final_resultas, echo=FALSE, include=TRUE}
+results_table(rmse_results, "Final results")
+
+a <- 1
+
+# 1 Just the average                                               1.0612      5
+# 2 Movie effect                                                   0.94391     5
+# 3 User and movie effect                                          0.86535    15
+# 4 Regularized movie effect                                       0.94385     5
+# 5 Regularized movie and user effect same tuning parameter        0.85670    25
+# 6 Regularized movie and user effect independent tuning parameter 0.85668    25
+```
+
+# Conclusion
+
+Further investigation would be exploring the genre effect relationship with user and movie effects. Perhaps a better approach would be using the Matrix Factorization technique and Principal Component Analysis with the recommenderlab package.
+
+
+

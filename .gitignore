@@ -1,0 +1,13 @@
+.Rproj.user
+*.Rproj
+.Rhistory
+.RData
+.Ruserdata
+*.tex
+ml-10M100k/
+*.html
+.DS_Store
+quiz.R
+start.R
+report_files/
+*_cache
